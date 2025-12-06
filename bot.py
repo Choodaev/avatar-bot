@@ -49,17 +49,17 @@ print(f"🌐 Веб-сервер запущен на порту {os.environ.get(
 # 🤖 Telegram-бот
 # ===============================
 STYLES = {
-    "christmas": "festive christmas style, warm golden lights, soft bokeh, elegant holiday dress, cozy atmosphere",
-    "premium": "professional portrait photography, soft golden hour lighting, shallow depth of field, elegant, high detail skin",
+    "anime": "anime style, big sparkling eyes, soft pastel background, fantasy, 8k, masterpiece",
     "cyberpunk": "cyberpunk style, neon lighting, futuristic city background, glowing eyes, sci-fi, cinematic",
-    "anime": "anime style, big sparkling eyes, soft pastel background, fantasy, 8k, masterpiece"
+    "premium": "professional portrait photography, soft golden hour lighting, shallow depth of field, elegant, high detail skin",
+    "christmas": "festive christmas style, warm golden lights, soft bokeh, elegant
 }
 
 @router.message(Command("start"))
 async def send_welcome(message: Message):
     await message.answer(
-        "📸 Привет! Отправь мне своё фото — и я создам уникальную аватарку с помощью FaceID!\n\n"
-        "Доступные стили: новогодний, премиум, киберпанк, аниме.\n"
+       "📸 Привет! Отправь мне своё фото — и я создам уникальную аватарку с помощью FaceID!\n\n"
+        "Доступные стили: аниме, киберпанк, премиум, рождественский.\n"
         "Полная версия (4K) доступна после генерации."
     )
 
