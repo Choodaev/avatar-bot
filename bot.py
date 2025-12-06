@@ -52,7 +52,7 @@ STYLES = {
     "anime": "anime style, big sparkling eyes, soft pastel background, fantasy, 8k, masterpiece",
     "cyberpunk": "cyberpunk style, neon lighting, futuristic city background, glowing eyes, sci-fi, cinematic",
     "premium": "professional portrait photography, soft golden hour lighting, shallow depth of field, elegant, high detail skin",
-    "christmas": "festive christmas style, warm golden lights, soft bokeh, elegant
+   "christmas": "festive christmas style, warm golden lights, soft bokeh, elegant holiday dress, cozy atmosphere"
 }
 
 @router.message(Command("start"))
