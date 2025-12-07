@@ -33,7 +33,7 @@ class UserFlow(StatesGroup):
     awaiting_photo = State()
     awaiting_style = State()
 
-# Стили генерации
+# Стили генерации (обновлённые под новую модель)
 STYLES = {
     "new_year": "festive new year style, golden sparkles, soft glowing lights, elegant holiday outfit, cozy winter atmosphere, cinematic, 8k",
     "ornament": "Ultra-realistic Christmas tree ornament: take the face from the uploaded photo and transform it into a small, handcrafted holiday figurine. Preserve exact facial likeness to the uploaded image—even if the source is just a portrait. The figurine is full-body, dressed in cozy, festive knitted attire and matching footwear, styled for the holidays. The miniature is seamlessly scaled up to a lifelike full-size representation while maintaining structural and textural integrity. Highly detailed fabric folds, fine stitching, tiny accessories, and a mix of glossy polymer surfaces with hand-painted matte textures. Include subtle imperfections for authenticity, realistic skin rendering, accurate proportions, and zero distortion. The full-body ornament hangs from a delicate golden thread, suspended among natural green pine branches, with a warm, golden holiday bokeh in the background. Atmosphere: cozy, festive, and intimate. Lighting: soft, warm, diffused, with gentle reflections. Style: premium handcrafted aesthetic, cinematic shallow depth of field.",
@@ -51,7 +51,7 @@ STYLE_TITLES = {
     "cyberpunk": "🕶️ Киберпанк"
 }
 
-# Команда /start
+# Команда /start — основной вход
 @router.message(Command("start"))
 async def send_welcome(message: Message, state: FSMContext):
     await state.set_state(UserFlow.awaiting_consent)
@@ -89,7 +89,6 @@ async def consent_not_given(message: Message):
 # Обработка фото
 @router.message(UserFlow.awaiting_photo, F.content_type == ContentType.PHOTO)
 async def handle_photo(message: Message, state: FSMContext):
-    # Сохраняем фото временно
     photo = message.photo[-1]
     file_info = await bot.get_file(photo.file_id)
     
@@ -97,11 +96,9 @@ async def handle_photo(message: Message, state: FSMContext):
         await bot.download_file(file_info.file_path, tmp.name)
         image_path = tmp.name
 
-    # Сохраняем путь в состоянии
     await state.update_data(image_path=image_path)
     await state.set_state(UserFlow.awaiting_style)
 
-    # Кнопки выбора стиля
     buttons = [
         [KeyboardButton(text=STYLE_TITLES["new_year"])],
         [KeyboardButton(text=STYLE_TITLES["ornament"])],
@@ -122,13 +119,11 @@ async def handle_photo(message: Message, state: FSMContext):
 async def not_a_photo(message: Message):
     await message.answer("Пожалуйста, отправь именно фото (не файл, не текст).")
 
-# Обработка выбора стиля
+# Обработка выбора стиля и генерация
 @router.message(UserFlow.awaiting_style)
 async def handle_style_choice(message: Message, state: FSMContext):
     text = message.text
     style_key = None
-
-    # Определяем ключ стиля по тексту кнопки
     for key, title in STYLE_TITLES.items():
         if title == text:
             style_key = key
@@ -138,7 +133,6 @@ async def handle_style_choice(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, выбери стиль из списка.")
         return
 
-    # Получаем путь к фото
     user_data = await state.get_data()
     image_path = user_data.get("image_path")
 
@@ -150,16 +144,17 @@ async def handle_style_choice(message: Message, state: FSMContext):
     await message.reply("🔄 Генерирую аватарку... (~15 секунд)")
 
     try:
+        # ИСПОЛЬЗУЕМ НОВУЮ, АКТУАЛЬНУЮ МОДЕЛЬ
         output = replicate.run(
-            "tencentarc/ip-adapter-faceid-sdxl:ef4d7631a8a27a7e1b83a7a04d3f6a9a5d4b2b1a0c3a8a7a04d3f6a9a5d4b2b1",
+            "tencentarc/faceid-sdxl:836e7276d080c25c8b4e8e5e1e5a9b0e4f7c8d9a0b1c2d3e4f5a6b7c8d9e0f1",
             input={
                 "image": open(image_path, "rb"),
                 "prompt": STYLES[style_key],
                 "negative_prompt": "blurry, distorted face, extra fingers, bad anatomy, low quality, text, watermark",
                 "num_outputs": 1,
                 "guidance_scale": 7.5,
-                "num_inference_steps": 30,
-                "scheduler": "K_EULER"
+                "num_inference_steps": 30
+                # scheduler не нужен для этой модели
             }
         )
 
@@ -172,33 +167,37 @@ async def handle_style_choice(message: Message, state: FSMContext):
             await message.reply("❌ Не удалось сгенерировать. Попробуй другое фото.")
 
     except Exception as e:
-        print(f"Ошибка генерации: {e}")
+        print(f"🔍 ОШИБКА REPLICATE: {e}")
         await message.reply("⚠️ Ошибка сервера. Попробуй позже.")
 
     finally:
-        # Удаляем фото
         if os.path.exists(image_path):
             os.remove(image_path)
-        # Сбрасываем состояние — можно начать заново
         await state.clear()
         await message.answer("Хочешь создать ещё одну аватарку? Просто отправь новое фото!")
 
-# Обработка остальных сообщений (если пользователь вне потока)
+# Обработка остальных сообщений
 @router.message()
 async def fallback(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
-        await message.answer("Начни с команды /start")
+        await message.answer(
+            "👋 Привет! Нажми /start, чтобы начать создавать аватарки.",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="/start")]],
+                resize_keyboard=True
+            )
+        )
     elif "awaiting_photo" in current_state:
         await message.answer("Пожалуйста, отправь фото.")
     elif "awaiting_style" in current_state:
         await message.answer("Пожалуйста, выбери стиль из списка.")
 
-# Запуск бота
+# Запуск
 dp.include_router(router)
 
 async def main():
-    print("🤖 Telegram-бот запущен и готов принимать фото!")
+    print("🤖 Бот запущен. Ожидание фото...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
