@@ -1,0 +1,14 @@
+[Unit]
+Description=Avatar Bot with FaceID (Yandex Cloud)
+After=network.target
+
+[Service]
+Type=simple
+User=yc-user
+WorkingDirectory=/home/yc-user/avatar-bot
+ExecStart=/home/yc-user/avatar-bot/venv/bin/python bot_local.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
