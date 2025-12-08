@@ -10,22 +10,20 @@ from aiogram.types import (
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-import replicate
+from PIL import Image
+import torch
+from diffusers import StableDiffusionXLPipeline
 
 # Загрузка переменных окружения
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-REPLICATE_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ Не задан TELEGRAM_BOT_TOKEN в .env")
-if not REPLICATE_TOKEN:
-    raise ValueError("❌ Не задан REPLICATE_API_TOKEN в .env")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 router = Router()
-os.environ["REPLICATE_API_TOKEN"] = REPLICATE_TOKEN
 
 # Состояния FSM
 class UserFlow(StatesGroup):
@@ -33,6 +31,32 @@ class UserFlow(StatesGroup):
     awaiting_photo = State()
     awaiting_main_style = State()
     awaiting_substyle = State()
+
+# Глобальная переменная модели
+pipe = None
+
+async def load_model():
+    """Загружает модель SDXL + IP-Adapter один раз при первом запуске"""
+    global pipe
+    if pipe is not None:
+        return
+    print("🔄 Загружаем модель SDXL + IP-Adapter... (первый запуск ~10–15 мин)")
+    try:
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        ).to("cpu")
+        pipe.load_ip_adapter(
+            "h94/IP-Adapter",
+            subfolder="sdxl",
+            weight_name="ip-adapter_sdxl.bin"
+        )
+        pipe.set_ip_adapter_scale(0.7)
+        print("✅ Модель загружена успешно!")
+    except Exception as e:
+        print(f"❌ Ошибка загрузки модели: {e}")
+        raise
 
 # Основные стили
 MAIN_STYLES = {
@@ -125,7 +149,7 @@ SUBSTYLES = {
     }
 }
 
-# Названия для кнопок
+# Названия кнопок
 substyle_titles = {
     # Новогодний
     "snow": "❄️ Со снегом", "tree": "🎄 У ёлки", "fireplace": "🔥 У камина",
@@ -176,7 +200,7 @@ async def send_welcome(message: Message, state: FSMContext):
         "⚠️ *Важно*:\n"
         "— Я использую твоё фото только для генерации аватарки\n"
         "— Фото удаляется сразу после обработки\n"
-        "— Изображение временно передаётся в нейросеть (Replicate) для обработки\n"
+        "— Изображение временно передаётся в нейросеть (локально, в РФ)\n"
         "— Сгенерированный аватар предназначен для личного использования\n\n"
         "Нажми «Принимаю» ниже, чтобы продолжить (а также согласен с "
         "[Согласием на обработку персональных данных и Политикой конфиденциальности]"
@@ -210,10 +234,7 @@ async def handle_photo(message: Message, state: FSMContext):
     await state.update_data(image_path=image_path)
     await state.set_state(UserFlow.awaiting_main_style)
     buttons = [[KeyboardButton(text=title)] for title in MAIN_STYLES.values()]
-    await message.answer(
-        "Выбери основной стиль:",
-        reply_markup=ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-    )
+    await message.answer("Выбери основной стиль:", reply_markup=ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True))
 
 @router.message(UserFlow.awaiting_photo)
 async def not_a_photo(message: Message):
@@ -234,12 +255,9 @@ async def handle_main_style(message: Message, state: FSMContext):
     await state.set_state(UserFlow.awaiting_substyle)
     substyles = SUBSTYLES[main_style_key]
     buttons = [[KeyboardButton(text=substyle_titles.get(k, k))] for k in substyles.keys()]
-    await message.answer(
-        "Выбери вариант:",
-        reply_markup=ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-    )
+    await message.answer("Выбери вариант:", reply_markup=ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True))
 
-# Генерация
+# Генерация по подварианту
 @router.message(UserFlow.awaiting_substyle)
 async def handle_substyle(message: Message, state: FSMContext):
     user_data = await state.get_data()
@@ -258,36 +276,35 @@ async def handle_substyle(message: Message, state: FSMContext):
         await message.answer("Выбери вариант из списка.")
         return
     prompt = SUBSTYLES[main_style][substyle_key]
-    await message.reply("🔄 Генерирую... (~15 сек)")
+    await message.reply("🔄 Генерирую... (~45 сек)")
+
     try:
-        output = replicate.run(
-            "tencentarc/faceid-sdxl:836e7276d080c25c8b4e8e5e1e5a9b0e4f7c8d9a0b1c2d3e4f5a6b7c8d9e0f1",
-            input={
-                "image": open(image_path, "rb"),
-                "prompt": prompt,
-                "negative_prompt": "blurry, distorted face, extra fingers, bad anatomy, low quality, text, watermark",
-                "num_outputs": 1,
-                "guidance_scale": 7.5,
-                "num_inference_steps": 30
-            }
-        )
-        if output and isinstance(output, list):
-            await message.answer_photo(
-                photo=URLInputFile(output[0]),
-                caption="✨ Готово! Это preview. Полная версия — после оплаты."
-            )
-        else:
-            await message.reply("❌ Не удалось сгенерировать. Попробуй другое фото.")
+        await load_model()  # Загрузка модели (если не загружена)
+        output = pipe(
+            prompt=prompt,
+            ip_adapter_image=Image.open(image_path),
+            negative_prompt="blurry, distorted face, extra fingers, bad anatomy, low quality, text, watermark",
+            num_inference_steps=30,
+            guidance_scale=7.5
+        ).images[0]
+        
+        output_path = tempfile.mktemp(suffix=".jpg")
+        output.save(output_path)
+        await message.answer_photo(photo=URLInputFile(output_path), caption="✨ Готово!")
+        
     except Exception as e:
-        print(f"Ошибка: {e}")
-        await message.reply("⚠️ Серверная ошибка. Попробуй позже.")
+        print(f"Ошибка генерации: {e}")
+        await message.reply("⚠️ Ошибка сервера. Попробуй позже.")
+
     finally:
         if os.path.exists(image_path):
             os.remove(image_path)
+        if 'output_path' in locals() and os.path.exists(output_path):
+            os.remove(output_path)
         await state.clear()
         await message.answer("Хочешь создать ещё? Просто отправь новое фото!")
 
-# Остальное
+# Остальные сообщения
 @router.message()
 async def fallback(message: Message, state: FSMContext):
     current_state = await state.get_state()
