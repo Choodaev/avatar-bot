@@ -2,3 +2,9 @@ aiogram==3.6.0
 python-dotenv==1.0.1
 aiofiles==23.2.1
 Pillow==10.2.0
+torch==2.1.2
+torchvision==0.16.2
+diffusers==0.27.2
+accelerate==0.29.3
+transformers==4.38.2
+safetensors==0.4.2
