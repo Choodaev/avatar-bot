@@ -1,46 +1,117 @@
 import os
 import tempfile
 import asyncio
+import json
+from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
-    Message, ContentType, URLInputFile,
-    ReplyKeyboardMarkup, KeyboardButton
+    Message, ContentType, URLInputFile, FSInputFile,
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    LabeledPrice
 )
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from PIL import Image
+from aiogram.types.pre_checkout_query import PreCheckoutQuery
+from PIL import Image, ImageDraw, ImageFont
 import torch
 from diffusers import StableDiffusionXLPipeline
 
-# Загрузка переменных окружения
+# === КОНФИГУРАЦИЯ ===
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ Не задан TELEGRAM_BOT_TOKEN в .env")
 
+# Пакеты
+PACKETS = {
+    "base": {"label": "Базовый (5 генераций)", "price": 4900, "generations": 5},
+    "standard": {"label": "Стандарт (20 генераций)", "price": 19900, "generations": 20},
+    "premium": {"label": "Премиум (50 генераций)", "price": 29900, "generations": 50}
+}
+
+# Файлы
+ANALYTICS_FILE = "analytics.json"
+BALANCE_FILE = "user_balances.json"
+
+# === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 router = Router()
-
-# Состояния FSM
-class UserFlow(StatesGroup):
-    awaiting_consent = State()
-    awaiting_photo = State()
-    awaiting_main_style = State()
-    awaiting_substyle = State()
-
-# Глобальная переменная модели
 pipe = None
 
+# === АНАЛИТИКА ===
+def log_generation(style: str, substyle: str, success: bool = True):
+    try:
+        try:
+            with open(ANALYTICS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {"total": 0, "styles": {}}
+
+        data["total"] += 1
+        if style not in data["styles"]:
+            data["styles"][style] = {"total": 0, "substyles": {}}
+        data["styles"][style]["total"] += 1
+        if substyle not in data["styles"][style]["substyles"]:
+            data["styles"][style]["substyles"][substyle] = 0
+        data["styles"][style]["substyles"][substyle] += 1
+
+        with open(ANALYTICS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"📊 Аналитика: {style} / {substyle} → {'✓' if success else '✗'}")
+    except Exception as e:
+        print(f"⚠️ Ошибка аналитики: {e}")
+
+# === БАЛАНС ===
+async def get_user_balance(user_id: int) -> int:
+    try:
+        with open(BALANCE_FILE, "r") as f:
+            balances = json.load(f)
+        return balances.get(str(user_id), 0)
+    except:
+        return 0
+
+async def update_user_balance(user_id: int, delta: int):
+    try:
+        with open(BALANCE_FILE, "r") as f:
+            balances = json.load(f)
+    except:
+        balances = {}
+    balances[str(user_id)] = balances.get(str(user_id), 0) + delta
+    with open(BALANCE_FILE, "w") as f:
+        json.dump(balances, f)
+
+# === ВОДЯНОЙ ЗНАК ===
+def add_watermark(image_path: str) -> str:
+    image = Image.open(image_path).convert("RGB")
+    image.thumbnail((1280, 720), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 30)
+    except:
+        font = ImageFont.load_default()
+    text = "PREVIEW @lumifyaibot"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    x = image.width - text_width - 20
+    y = image.height - text_height - 20
+    draw.rectangle([x-5, y-5, x+text_width+5, y+text_height+5], fill=(0, 0, 0, 128))
+    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+    preview_path = tempfile.mktemp(suffix=".jpg")
+    image.save(preview_path, "JPEG", quality=85)
+    return preview_path
+
+# === МОДЕЛЬ ===
 async def load_model():
-    """Загружает модель SDXL + IP-Adapter один раз при первом запуске"""
     global pipe
     if pipe is not None:
         return
-    print("🔄 Загружаем модель SDXL + IP-Adapter... (первый запуск ~10–15 мин)")
+    print("🔄 Загружаем модель SDXL + IP-Adapter...")
     try:
         pipe = StableDiffusionXLPipeline.from_pretrained(
             "stabilityai/stable-diffusion-xl-base-1.0",
@@ -53,12 +124,19 @@ async def load_model():
             weight_name="ip-adapter_sdxl.bin"
         )
         pipe.set_ip_adapter_scale(0.7)
-        print("✅ Модель загружена успешно!")
+        print("✅ Модель загружена!")
     except Exception as e:
         print(f"❌ Ошибка загрузки модели: {e}")
         raise
 
-# Основные стили
+# === FSM ===
+class UserFlow(StatesGroup):
+    awaiting_consent = State()
+    awaiting_photo = State()
+    awaiting_main_style = State()
+    awaiting_substyle = State()
+
+# === СТИЛИ ===
 MAIN_STYLES = {
     "new_year": "✨ Новогодний",
     "ornament": "🎄 Елочная игрушка",
@@ -70,7 +148,6 @@ MAIN_STYLES = {
     "studio": "📸 Студийное"
 }
 
-# Подварианты
 SUBSTYLES = {
     "new_year": {
         "snow": "winter snowy background, soft falling snowflakes, warm scarf, cozy atmosphere, festive lights, cinematic",
@@ -149,7 +226,6 @@ SUBSTYLES = {
     }
 }
 
-# Названия кнопок
 substyle_titles = {
     # Новогодний
     "snow": "❄️ Со снегом", "tree": "🎄 У ёлки", "fireplace": "🔥 У камина",
@@ -191,20 +267,15 @@ substyle_titles = {
     "bw_man_suit_2": "⚫️ Ч/б мужской в строгом костюме 2"
 }
 
-# /start — согласие
+# === ОБРАБОТЧИКИ ===
 @router.message(Command("start"))
 async def send_welcome(message: Message, state: FSMContext):
     await state.set_state(UserFlow.awaiting_consent)
     await message.answer(
-        "📸 Привет! Чтобы создать аватарку, мне нужно обработать твоё фото.\n\n"
-        "⚠️ *Важно*:\n"
-        "— Я использую твоё фото только для генерации аватарки\n"
-        "— Фото удаляется сразу после обработки\n"
-        "— Изображение временно передаётся в нейросеть (локально, в РФ)\n"
-        "— Сгенерированный аватар предназначен для личного использования\n\n"
-        "Нажми «Принимаю» ниже, чтобы продолжить (а также согласен с "
-        "[Согласием на обработку персональных данных и Политикой конфиденциальности]"
-        "(https://telegra.ph/Politika-konfidencialnosti-12-06-68)):",
+        "📸 Привет! Загрузи фото — создам стильную аватарку!\n\n"
+        "⚠️ Я использую твоё фото только для генерации и удаляю его сразу после обработки.\n\n"
+        "Нажми «Принимаю», чтобы продолжить (согласен с "
+        "[Политикой конфиденциальности](https://telegra.ph/Politika-konfidencialnosti-12-06-68)):",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="Принимаю")]],
@@ -213,7 +284,6 @@ async def send_welcome(message: Message, state: FSMContext):
         )
     )
 
-# Обработка согласия
 @router.message(UserFlow.awaiting_consent, F.text == "Принимаю")
 async def consent_accepted(message: Message, state: FSMContext):
     await state.set_state(UserFlow.awaiting_photo)
@@ -223,7 +293,6 @@ async def consent_accepted(message: Message, state: FSMContext):
 async def consent_not_given(message: Message):
     await message.answer("Пожалуйста, нажми «Принимаю», чтобы продолжить.")
 
-# Обработка фото
 @router.message(UserFlow.awaiting_photo, F.content_type == ContentType.PHOTO)
 async def handle_photo(message: Message, state: FSMContext):
     photo = message.photo[-1]
@@ -236,11 +305,6 @@ async def handle_photo(message: Message, state: FSMContext):
     buttons = [[KeyboardButton(text=title)] for title in MAIN_STYLES.values()]
     await message.answer("Выбери основной стиль:", reply_markup=ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True))
 
-@router.message(UserFlow.awaiting_photo)
-async def not_a_photo(message: Message):
-    await message.answer("Пожалуйста, отправь именно фото.")
-
-# Выбор основного стиля → подварианты
 @router.message(UserFlow.awaiting_main_style)
 async def handle_main_style(message: Message, state: FSMContext):
     main_style_key = None
@@ -257,7 +321,6 @@ async def handle_main_style(message: Message, state: FSMContext):
     buttons = [[KeyboardButton(text=substyle_titles.get(k, k))] for k in substyles.keys()]
     await message.answer("Выбери вариант:", reply_markup=ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True))
 
-# Генерация по подварианту
 @router.message(UserFlow.awaiting_substyle)
 async def handle_substyle(message: Message, state: FSMContext):
     user_data = await state.get_data()
@@ -275,11 +338,13 @@ async def handle_substyle(message: Message, state: FSMContext):
     if not substyle_key:
         await message.answer("Выбери вариант из списка.")
         return
+
+    log_generation(main_style, substyle_key, success=False)
     prompt = SUBSTYLES[main_style][substyle_key]
     await message.reply("🔄 Генерирую... (~45 сек)")
 
     try:
-        await load_model()  # Загрузка модели (если не загружена)
+        await load_model()
         output = pipe(
             prompt=prompt,
             ip_adapter_image=Image.open(image_path),
@@ -290,8 +355,26 @@ async def handle_substyle(message: Message, state: FSMContext):
         
         output_path = tempfile.mktemp(suffix=".jpg")
         output.save(output_path)
-        await message.answer_photo(photo=URLInputFile(output_path), caption="✨ Готово!")
         
+        user_id = message.from_user.id
+        balance = await get_user_balance(user_id)
+        
+        if balance > 0:
+            await message.answer_photo(photo=URLInputFile(output_path), caption="✨ Оригинал в 4K!")
+            await update_user_balance(user_id, balance - 1)
+            log_generation(main_style, substyle_key, success=True)
+        else:
+            preview_path = add_watermark(output_path)
+            await message.answer_photo(
+                photo=FSInputFile(preview_path),
+                caption="🖼️ Это превью. Купи пакет, чтобы получить 4K без водяного знака!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💳 Купить пакет", callback_data="show_payment")]
+                ])
+            )
+            os.remove(preview_path)
+            log_generation(main_style, substyle_key, success=False)
+            
     except Exception as e:
         print(f"Ошибка генерации: {e}")
         await message.reply("⚠️ Ошибка сервера. Попробуй позже.")
@@ -304,12 +387,71 @@ async def handle_substyle(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("Хочешь создать ещё? Просто отправь новое фото!")
 
-# Остальные сообщения
+# === ОПЛАТА ===
+@router.callback_query(F.data == "show_payment")
+async def show_payment_options(callback: CallbackQuery):
+    buttons = []
+    for key, packet in PACKETS.items():
+        buttons.append([InlineKeyboardButton(
+            text=f"{packet['label']} — {packet['price'] // 100} ₽",
+            callback_data=f"buy_{key}"
+        )])
+    await callback.message.answer(
+        "Выбери пакет, чтобы получать 4K изображения без водяного знака:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("buy_"))
+async def process_payment(callback: CallbackQuery):
+    packet_key = callback.data.split("_")[1]
+    packet = PACKETS[packet_key]
+    prices = [LabeledPrice(label=packet["label"], amount=packet["price"])]
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="Пакет генераций",
+        description=f"{packet['label']} — {packet['generations']} изображений в 4K",
+        payload=f"packet_{packet_key}_{callback.from_user.id}",
+        provider_token="",  # Обязательно пусто для Telegram Payments!
+        currency="RUB",
+        prices=prices,
+        start_parameter="lumify-packet",
+        need_name=False,
+        need_email=False,
+        need_phone_number=False,
+        need_shipping_address=False,
+        is_flexible=False
+    )
+    await callback.answer()
+
+@router.pre_checkout_query()
+async def pre_checkout(pre_checkout_q: PreCheckoutQuery, bot: Bot):
+    await bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
+
+@router.message(F.successful_payment)
+async def successful_payment(message: Message, state: FSMContext):
+    payload = message.successful_payment.invoice_payload
+    user_id = message.from_user.id
+    packet_key = payload.split("_")[1]
+    generations = PACKETS[packet_key]["generations"]
+    await update_user_balance(user_id, generations)
+    await message.answer(
+        f"✅ Оплата прошла успешно! Тебе доступно {generations} генераций в 4K.\n"
+        "Отправь фото, чтобы начать!"
+    )
+
+# === ОСТАЛЬНОЕ ===
 @router.message()
 async def fallback(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
-        await message.answer("👋 Привет! Нажми /start, чтобы начать создавать аватарки.")
+        await message.answer(
+            "👋 Привет! Нажми /start, чтобы начать создавать аватарки.",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="/start")]],
+                resize_keyboard=True
+            )
+        )
     else:
         await message.answer("Пожалуйста, следуй инструкциям.")
 
