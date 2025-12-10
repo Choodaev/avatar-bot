@@ -1,4 +1,5 @@
 import os
+import compat_patch
 import tempfile
 import asyncio
 import json
