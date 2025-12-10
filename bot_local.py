@@ -10,7 +10,7 @@ from aiogram.types import (
     Message, ContentType, URLInputFile, FSInputFile,
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    LabeledPrice
+    LabeledPrice, CallbackQuery
 )
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
