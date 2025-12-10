@@ -1,10 +1,10 @@
+import compat_patch
 import os
 import tempfile
 import asyncio
 import json
 from datetime import datetime
 from dotenv import load_dotenv
-import compat_patch
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message, ContentType, URLInputFile, FSInputFile,
